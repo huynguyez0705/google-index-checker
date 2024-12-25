@@ -2,149 +2,152 @@
 import 'dotenv/config'
 import chalk from 'chalk' // Terminal and string styling
 import axios from 'axios' // Axios client
-import { createWriteStream, writeFileSync } from 'fs' // Node file system module
-import { access } from 'fs/promises' // Promises Node file system module
+import { createWriteStream, readFileSync, access, writeFileSync, existsSync } from 'fs' // Node file system module
 import { parseCSV } from './lib/parser.js' // Convert csv to json module
 import { googlelify, encodeURL } from './lib/url-encoder.js' // Encoding functions
 import { timer } from './lib/timer.js' // Timer function
-import { batchRequest } from './lib/batchRequest.js'
 import sanitizeHtml from 'sanitize-html'
 
 // Settings
-const { yellow, cyan, white, red, green } = chalk
-const start = Date.now() // Date counter to check duration of script
-const site = 'https://www.google.com/search?q=' // Google search query
-const urlsFile = './urls.csv' // File containing all the urls to check
-const apiUrl = 'http://api.scraperapi.com/?api_key=' // ScraperAPI url
-const params = '&device_type=desktop'
-const apiKey = process.env.SCRAPERAPI_KEY
+const {
+	yellowBright: infoColor, // Màu thông tin
+	cyanBright: successColor, // Màu thành công
+	whiteBright: detailColor, // Màu chi tiết
+	redBright: errorColor, // Màu lỗi
+	greenBright: highlightColor, // Màu nổi bật
+	magentaBright: importantColor, // Màu quan trọng
+	blueBright: actionColor // Màu hành động
+} = chalk
+
+const start = Date.now() // Bộ đếm thời gian để tính toán thời gian chạy
+const site = 'https://www.google.com/search?q=site:' // Câu truy vấn tìm kiếm Google
+const urlsFile = '1.csv' // Thay bằng đường dẫn đầy đủ nếu cần
+const userAgentsFile = './user-agents.txt' // File chứa danh sách User-Agents
 
 let count = 1
 let notIndexedCounter = 0
 let urls = []
-let errors = []
 let len = 0
+let userAgents = []
 
-// Collect URLS, get max Concurrent and run request in pool
-;(async () => {
-  urls = await getUrls()
-  len = urls.length
-  const maxConcurrent = await getConcurrent()
-
-  await batchRequest(maxConcurrent, urls, runRequest)
-
-  while (errors.length) {
-    urls = errors
-    errors = []
-    await batchRequest(maxConcurrent, urls, runRequest)
-  }
-
-  finalMessage(len)
-})()
-
-// Gather URLS from file
-async function getUrls() {
-  try {
-    await access(urlsFile)
-    return await parseCSV(urlsFile)
-  } catch {
-    console.log(yellow('No urls.csv file found.'))
-    process.exit(1)
-  }
+// Load User-Agents from file
+function loadUserAgents() {
+	try {
+		const data = readFileSync(userAgentsFile, 'utf8') // Đọc file user-agents.txt
+		return data
+			.split('\n')
+			.map(line => line.trim()) // Loại bỏ khoảng trắng
+			.filter(line => /^[\x20-\x7E]+$/.test(line)) // Đảm bảo chỉ chứa ký tự hợp lệ
+	} catch (error) {
+		console.error(errorColor(`Lỗi khi tải file User-Agents: ${error.message}`))
+		process.exit(1)
+	}
 }
 
-// Connect to API to get allowed number of concurrent requests
-async function getConcurrent() {
-  try {
-    const { data } = await axios(`http://api.scraperapi.com/account?api_key=${apiKey}`)
-    return data.concurrencyLimit
-  } catch (error) {
-    if (error.response) {
-      throw new Error(
-        `${error.response.status} - Incorrect or missing API key please check your APIKEY.js file and make sure it includes a correct API key from https://www.scraperapi.com/`
-      )
-    } else {
-      console.error('There is a problem connecting to Scraperapi, please try again later')
-      process.exit()
-    }
-  }
+// Function to get a random User-Agent
+function getRandomUserAgent() {
+	const userAgent = userAgents[Math.floor(Math.random() * userAgents.length)]
+	console.log(importantColor(`Sử dụng User-Agent: ${userAgent}`)) // Log User-Agent được chọn
+	return userAgent
+}
+
+// Collect URLs and run requests
+;(async () => {
+	// Load User-Agents
+	userAgents = loadUserAgents()
+	if (userAgents.length === 0) {
+		console.error(errorColor('Không tìm thấy User-Agents hợp lệ trong user-agents.txt.'))
+		process.exit(1)
+	}
+
+	// Load URLs
+	urls = await getUrls()
+	len = urls.length
+
+	for (const url of urls) {
+		await runRequest(url)
+		// Thêm độ trễ giữa các yêu cầu để tránh bị chặn
+		await new Promise(resolve => setTimeout(resolve, 1000)) // Độ trễ 1 giây
+	}
+
+	finalMessage(len)
+})()
+
+// Gather URLs from file
+async function getUrls() {
+	console.log(infoColor(`Đang kiểm tra file: ${urlsFile}`)) // Log đường dẫn file
+
+	// Kiểm tra file tồn tại
+	if (!existsSync(urlsFile)) {
+		console.error(errorColor(`File ${urlsFile} không tồn tại.`))
+		process.exit(1)
+	}
+
+	console.log(successColor('File tồn tại và có thể truy cập.')) // Xác nhận file hợp lệ
+	return await parseCSV(urlsFile)
 }
 
 // HTTP request async
 async function runRequest(url) {
-  try {
-    // Prepare url to search like google does
-    const requestUrl = googlelify(url)
+	try {
+		// Chuẩn bị URL để tìm kiếm trên Google
+		const requestUrl = `${site}${encodeURL(url)}`
 
-    // HTTP request using axios, scraperapi, google and the enconded url
-    const { data, status } = await axios(
-      `${apiUrl}${apiKey}&url=${site}${requestUrl}${params}`
-    )
+		// Lấy User-Agent ngẫu nhiên
+		const randomUserAgent = getRandomUserAgent()
 
-    // Check if it matches google search results
-    const indexation = matchResponse(url, data)
+		// Gửi yêu cầu HTTP bằng axios
+		const { data, status } = await axios.get(requestUrl, {
+			headers: {
+				'User-Agent': randomUserAgent // Sử dụng User-Agent ngẫu nhiên
+			}
+		})
 
-    // Print to terminal each url, its number and status code
-    const counter = `${count++}/${len}`
-    const statusPrint = green.bold(status)
-    const indexPrint = white.bold(indexation)
+		// Kiểm tra kết quả tìm kiếm
+		const indexation = matchResponse(url, data)
 
-    console.log(cyan(`Checking: ${counter} ${url} ${statusPrint} ${indexPrint}`))
+		// In ra trạng thái từng URL, số thứ tự và mã trạng thái
+		const counter = `${count++}/${len}`
+		const statusPrint = highlightColor.bold(status)
+		const indexPrint = detailColor.bold(indexation)
 
-    // Create, append and clear stream
-    const stream = createWriteStream('./results.csv', { flags: 'a', encoding: 'utf8' })
+		console.table(actionColor(`Đang kiểm tra: ${counter} ${url} - Status ${statusPrint} - Status: ${indexPrint}`))
 
-    // Append evaluation from response to file
-    stream.write(`${url}, ${indexation}\n`)
-    // End stream to avoid accumulation
-    stream.end()
-  } catch (error) {
-    // Request made and server responded
-    const status = error.response ? error.response.status : 500
+		// Tạo, thêm, và xóa stream
+		const stream = createWriteStream('./results.csv', { flags: 'a', encoding: 'utf8' })
 
-    if (status === 429) {
-      console.error('Too many request, something went wrong check with SpaperAPI')
-      process.exit(1)
-    }
-
-    if ([500, 501, 502, 503, 504].includes(status)) {
-      // Log with different color to highlight the error
-      console.error(yellow(`Error: ${url} ${red(status)} ${green('Re-trying')}`))
-      errors.push(url)
-    }
-  }
+		// Ghi kết quả vào file
+		stream.write(`${url}, ${indexation}\n`)
+		// Đóng stream để tránh tràn bộ nhớ
+		stream.end()
+	} catch (error) {
+		console.error(infoColor(`Lỗi khi xử lý URL: ${url} - ${errorColor(error.message)}`))
+	}
 }
 
-// Compare url against google response url
+// So sánh URL với kết quả tìm kiếm trên Google
 function matchResponse(url, res) {
-  // Look for a tags with href attribute only
-  const content = sanitizeHtml(res, {
-    allowedTags: ['a'],
-    allowedAttributes: { a: ['href'] }
-  })
+	// Tìm các thẻ <a> có thuộc tính href
+	const content = sanitizeHtml(res, {
+		allowedTags: ['a'],
+		allowedAttributes: { a: ['href'] }
+	})
 
-  // Set not index to start
-  let indexResult = 'Not Indexed'
+	// Mặc định là "Chưa được lập chỉ mục"
+	let indexResult = 'No Index'
 
-  // If the encoded version of the URL is on google
-  if (content.includes(`href="${encodeURL(url)}"`)) {
-    indexResult = 'Indexed'
-  } else {
-    notIndexedCounter += 1
-  }
+	// Nếu URL được mã hóa có trong kết quả tìm kiếm Google
+	if (content.includes(`href="${encodeURL(url)}"`)) {
+		indexResult = 'Indexed'
+	} else {
+		notIndexedCounter += 1
+	}
 
-  return indexResult
+	return indexResult
 }
 
+// In thông báo cuối cùng
 function finalMessage(totalUrls) {
-  console.log(
-    `\n${totalUrls} URLS, results.csv file successfully written in ${timer(
-      Date.now() - start
-    )}\n`
-  )
-  console.log(
-    `${green.bold(`Indexed: ` + (totalUrls - notIndexedCounter))}\n${red.bold(
-      `Not indexed: ` + notIndexedCounter + `\n`
-    )}`
-  )
+	console.log(`\nĐã xử lý ${totalUrls} URL. Kết quả được ghi vào results.csv trong ${timer(Date.now() - start)}\n`)
+	console.log(`${highlightColor.bold(`Indexed: ` + (totalUrls - notIndexedCounter))}\n${errorColor.bold(`No Index: ` + notIndexedCounter + `\n`)}`)
 }
